@@ -1,6 +1,63 @@
 import os
 import json
+import threading
 from pathlib import Path
+
+
+class TavilyKeyPool:
+    """Round-robin pool for multiple Tavily API keys (comma-separated)."""
+
+    def __init__(self, raw_env: str | None):
+        if raw_env:
+            self._keys: list[str] = [k.strip() for k in raw_env.split(",") if k.strip()]
+        else:
+            self._keys = []
+        self._index = 0
+        self._lock = threading.Lock()
+        self._rate_limited: set[str] = set()
+
+    @property
+    def size(self) -> int:
+        return len(self._keys)
+
+    @property
+    def has_keys(self) -> bool:
+        return len(self._keys) > 0
+
+    def get_next_key(self) -> str | None:
+        if not self._keys:
+            return None
+        with self._lock:
+            return self._pick()
+
+    def _pick(self) -> str | None:
+        n = len(self._keys)
+        for _ in range(n):
+            key = self._keys[self._index % n]
+            self._index += 1
+            if key not in self._rate_limited:
+                return key
+        self._rate_limited.clear()
+        key = self._keys[self._index % n]
+        self._index += 1
+        return key
+
+    def mark_rate_limited(self, key: str) -> None:
+        with self._lock:
+            self._rate_limited.add(key)
+
+    def get_first_key(self) -> str | None:
+        return self._keys[0] if self._keys else None
+
+    def get_status(self, mask_fn) -> dict:
+        with self._lock:
+            return {
+                "total_keys": len(self._keys),
+                "available_keys": len(self._keys) - len(self._rate_limited),
+                "rate_limited_keys": len(self._rate_limited),
+                "keys": [mask_fn(k) for k in self._keys],
+            }
+
 
 class Config:
     _instance = None
@@ -17,6 +74,7 @@ class Config:
             cls._instance = super().__new__(cls)
             cls._instance._config_file = None
             cls._instance._cached_model = None
+            cls._instance._tavily_key_pool = None
         return cls._instance
 
     @property
@@ -92,8 +150,14 @@ class Config:
         return os.getenv("TAVILY_API_URL", "https://api.tavily.com")
 
     @property
+    def tavily_key_pool(self) -> TavilyKeyPool:
+        if self._tavily_key_pool is None:
+            self._tavily_key_pool = TavilyKeyPool(os.getenv("TAVILY_API_KEY"))
+        return self._tavily_key_pool
+
+    @property
     def tavily_api_key(self) -> str | None:
-        return os.getenv("TAVILY_API_KEY")
+        return self.tavily_key_pool.get_first_key()
 
     @property
     def firecrawl_api_url(self) -> str:
@@ -185,7 +249,7 @@ class Config:
             "GROK_LOG_DIR": str(self.log_dir),
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
-            "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key) if self.tavily_api_key else "未配置",
+            "TAVILY_API_KEY": self.tavily_key_pool.get_status(self._mask_api_key) if self.tavily_key_pool.has_keys else "未配置",
             "FIRECRAWL_API_URL": self.firecrawl_api_url,
             "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
             "config_status": config_status
