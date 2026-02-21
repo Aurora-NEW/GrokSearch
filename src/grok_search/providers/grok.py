@@ -1,5 +1,6 @@
 import httpx
 import json
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Optional
@@ -210,7 +211,12 @@ class GrokSearchProvider(BaseSearchProvider):
         
         await log_info(ctx, f"content: {content}", config.debug_enabled)
 
-        return content
+        # 清理 <think> 标签（grok-4.20-beta 等深度思考模型会输出）
+        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        # 去掉 markdown 代码围栏
+        content = re.sub(r'^```(?:json)?\s*\n?', '', content, flags=re.MULTILINE)
+        content = re.sub(r'\n?```\s*$', '', content, flags=re.MULTILINE)
+        return content.strip()
 
     async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
         """执行带重试机制的流式 HTTP 请求"""

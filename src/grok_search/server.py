@@ -830,8 +830,15 @@ def main():
 
         threading.Thread(target=monitor_parent, daemon=True).start()
 
+    # 支持通过环境变量选择 transport：stdio（默认）或 sse
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
     try:
-        mcp.run(transport="stdio")
+        if transport == "sse":
+            host = os.getenv("MCP_HOST", "0.0.0.0")
+            port = int(os.getenv("MCP_PORT", "8808"))
+            mcp.run(transport="sse", host=host, port=port)
+        else:
+            mcp.run(transport="stdio")
     except KeyboardInterrupt:
         pass
     finally:
