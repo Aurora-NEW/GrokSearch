@@ -6,7 +6,12 @@ src_dir = Path(__file__).parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from mcp.server.fastmcp import FastMCP, Context
+# Prefer standalone fastmcp package when available (supports run(..., host=, port=)).
+# Fallback to mcp.server.fastmcp for environments that only ship MCP's bundled server.
+try:
+    from fastmcp import FastMCP, Context
+except ImportError:
+    from mcp.server.fastmcp import FastMCP, Context
 from typing import Annotated, Optional
 from pydantic import Field
 
@@ -794,6 +799,35 @@ def main():
     import signal
     import os
     import threading
+    import inspect
+
+    def _run_sse_server(host: str, port: int, mount_path: str | None) -> None:
+        """Run SSE transport across both FastMCP API variants."""
+        # mcp.server.fastmcp uses settings.host/settings.port for bind address
+        settings = getattr(mcp, "settings", None)
+        if settings is not None:
+            settings.host = host
+            settings.port = port
+
+        # fastmcp package run(...) accepts **transport_kwargs (host/port)
+        supports_transport_kwargs = False
+        try:
+            params = inspect.signature(mcp.run).parameters.values()
+            supports_transport_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        except (TypeError, ValueError):
+            supports_transport_kwargs = False
+
+        if supports_transport_kwargs:
+            kwargs: dict = {"transport": "sse", "host": host, "port": port}
+            if mount_path:
+                kwargs["mount_path"] = mount_path
+            mcp.run(**kwargs)
+            return
+
+        if mount_path:
+            mcp.run(transport="sse", mount_path=mount_path)
+        else:
+            mcp.run(transport="sse")
 
     # 信号处理（仅主线程）
     if threading.current_thread() is threading.main_thread():
@@ -836,7 +870,8 @@ def main():
         if transport == "sse":
             host = os.getenv("MCP_HOST", "0.0.0.0")
             port = int(os.getenv("MCP_PORT", "8808"))
-            mcp.run(transport="sse", host=host, port=port)
+            mount_path = os.getenv("MCP_MOUNT_PATH")
+            _run_sse_server(host=host, port=port, mount_path=mount_path)
         else:
             mcp.run(transport="stdio")
     except KeyboardInterrupt:
