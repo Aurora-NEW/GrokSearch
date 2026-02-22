@@ -1,14 +1,16 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional
 import uuid
 
 
 class IntentOutput(BaseModel):
-    core_question: str = Field(description="Distilled core question in one sentence")
-    query_type: Literal["factual", "comparative", "exploratory", "analytical"] = Field(
+    core_question: Optional[str] = Field(default=None, description="Distilled core question in one sentence")
+    query_type: Optional[str] = Field(
+        default=None,
         description="factual=single answer, comparative=A vs B, exploratory=broad understanding, analytical=deep reasoning"
     )
-    time_sensitivity: Literal["realtime", "recent", "historical", "irrelevant"] = Field(
+    time_sensitivity: Optional[str] = Field(
+        default=None,
         description="realtime=today, recent=days/weeks, historical=months+, irrelevant=timeless"
     )
     domain: Optional[str] = Field(default=None, description="Specific domain if identifiable")
@@ -21,50 +23,66 @@ class IntentOutput(BaseModel):
         "Each should become a prerequisite sub-query in Phase 3."
     )
 
+    model_config = {"extra": "allow"}
+
 
 class ComplexityOutput(BaseModel):
-    level: Literal[1, 2, 3] = Field(
+    level: Optional[int] = Field(
+        default=None,
         description="1=simple (1-2 searches), 2=moderate (3-5 searches), 3=complex (6+ searches)"
     )
-    estimated_sub_queries: Optional[int] = Field(default=None, ge=1, le=20)
-    estimated_tool_calls: Optional[int] = Field(default=None, ge=1, le=50)
+    estimated_sub_queries: Optional[int] = Field(default=None)
+    estimated_tool_calls: Optional[int] = Field(default=None)
     justification: Optional[str] = Field(default=None)
+
+    model_config = {"extra": "allow"}
 
 
 class SubQuery(BaseModel):
-    id: str = Field(description="Unique identifier (e.g., 'sq1')")
-    goal: str
-    expected_output: str = Field(description="What a successful result looks like")
+    id: Optional[str] = Field(default=None, description="Unique identifier (e.g., 'sq1')")
+    goal: Optional[str] = Field(default=None)
+    expected_output: Optional[str] = Field(default=None, description="What a successful result looks like")
     tool_hint: Optional[str] = Field(default=None, description="Suggested tool: web_search | web_fetch | web_map")
-    boundary: str = Field(description="What this sub-query explicitly excludes — MUST state mutual exclusion with sibling sub-queries, not just the broader domain")
+    boundary: Optional[str] = Field(default=None, description="What this sub-query explicitly excludes")
     depends_on: Optional[list[str]] = Field(default=None, description="IDs of prerequisite sub-queries")
+
+    model_config = {"extra": "allow"}
 
 
 class SearchTerm(BaseModel):
-    term: str = Field(description="Search query string. MUST be ≤8 words. Drop redundant synonyms (e.g., use 'RAG' not 'RAG retrieval augmented generation').")
-    purpose: str = Field(description="Single sub-query ID this term serves (e.g., 'sq2'). ONE term per sub-query — do NOT combine like 'sq1+sq2'.")
-    round: int = Field(ge=1, description="Execution round: 1=broad discovery, 2+=targeted follow-up refined by round 1 findings")
+    term: Optional[str] = Field(default=None, description="Search query string.")
+    purpose: Optional[str] = Field(default=None, description="Single sub-query ID this term serves (e.g., 'sq2').")
+    round: Optional[int] = Field(default=None, description="Execution round: 1=broad discovery, 2+=targeted follow-up")
+
+    model_config = {"extra": "allow"}
 
 
 class StrategyOutput(BaseModel):
-    approach: Literal["broad_first", "narrow_first", "targeted"] = Field(
+    approach: Optional[str] = Field(
+        default=None,
         description="broad_first=wide then narrow, narrow_first=precise then expand, targeted=known-item"
     )
-    search_terms: list[SearchTerm]
+    search_terms: Optional[list[SearchTerm]] = Field(default=None)
     fallback_plan: Optional[str] = Field(default=None, description="Fallback if primary searches fail")
+
+    model_config = {"extra": "allow"}
 
 
 class ToolPlanItem(BaseModel):
-    sub_query_id: str
-    tool: Literal["web_search", "web_fetch", "web_map"]
-    reason: str
+    sub_query_id: Optional[str] = Field(default=None)
+    tool: Optional[str] = Field(default=None)
+    reason: Optional[str] = Field(default=None)
     params: Optional[dict] = Field(default=None, description="Tool-specific parameters")
+
+    model_config = {"extra": "allow"}
 
 
 class ExecutionOrderOutput(BaseModel):
-    parallel: list[list[str]] = Field(description="Groups of sub-query IDs runnable in parallel")
-    sequential: list[str] = Field(description="Sub-query IDs that must run in order")
-    estimated_rounds: int = Field(ge=1)
+    parallel: Optional[list[list[str]]] = Field(default=None, description="Groups of sub-query IDs runnable in parallel")
+    sequential: Optional[list[str]] = Field(default=None, description="Sub-query IDs that must run in order")
+    estimated_rounds: Optional[int] = Field(default=None)
+
+    model_config = {"extra": "allow"}
 
 
 PHASE_NAMES = [
