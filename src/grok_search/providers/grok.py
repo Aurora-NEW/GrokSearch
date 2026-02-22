@@ -214,8 +214,8 @@ class GrokSearchProvider(BaseSearchProvider):
         # 清理 <think> 标签（grok-4.20-beta 等深度思考模型会输出）
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         # 去掉 markdown 代码围栏
-        content = re.sub(r'^```(?:json)?\s*\n?', '', content, flags=re.MULTILINE)
-        content = re.sub(r'\n?```\s*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'\A```(?:json)?\s*\n?', '', content)
+        content = re.sub(r'\n?```\s*\Z', '', content)
         return content.strip()
 
     async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
