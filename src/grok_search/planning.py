@@ -26,9 +26,9 @@ class ComplexityOutput(BaseModel):
     level: Literal[1, 2, 3] = Field(
         description="1=simple (1-2 searches), 2=moderate (3-5 searches), 3=complex (6+ searches)"
     )
-    estimated_sub_queries: int = Field(ge=1, le=20)
-    estimated_tool_calls: int = Field(ge=1, le=50)
-    justification: str
+    estimated_sub_queries: Optional[int] = Field(default=None, ge=1, le=20)
+    estimated_tool_calls: Optional[int] = Field(default=None, ge=1, le=50)
+    justification: Optional[str] = Field(default=None)
 
 
 class SubQuery(BaseModel):
