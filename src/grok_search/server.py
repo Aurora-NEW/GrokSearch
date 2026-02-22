@@ -394,13 +394,26 @@ def main():
 
         threading.Thread(target=monitor_parent, daemon=True).start()
 
+    import inspect
+
+    def _run_sse_server(host: str, port: int):
+        """启动 SSE 服务，兼容不同版本 fastmcp"""
+        params = inspect.signature(mcp.run).parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            # fastmcp 支持 **transport_kwargs
+            mcp.run(transport="sse", host=host, port=port)
+        else:
+            try:
+                mcp.run(transport="sse")
+            except TypeError:
+                import asyncio
+                asyncio.run(mcp.run_sse_async(host=host, port=port))
+
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "8809"))
+
     try:
-        mcp.run_sse_async
-        import asyncio
-        asyncio.run(mcp.run_sse_async(host="0.0.0.0", port=int(os.getenv("MCP_PORT", "8809"))))
-    except AttributeError:
-        # fallback: newer fastmcp
-        mcp.run(transport="sse", host="0.0.0.0", port=int(os.getenv("MCP_PORT", "8809")))
+        _run_sse_server(host, port)
     except KeyboardInterrupt:
         pass
     finally:
