@@ -12,7 +12,7 @@ try:
     from fastmcp import FastMCP, Context
 except ImportError:
     from mcp.server.fastmcp import FastMCP, Context
-from typing import Annotated, Optional
+from typing import Annotated
 from pydantic import Field
 
 # 尝试使用绝对导入（支持 mcp run）
@@ -20,28 +20,17 @@ try:
     from grok_search.providers.grok import GrokSearchProvider
     from grok_search.logger import log_info
     from grok_search.config import config
-    from grok_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
-    from grok_search.planning import (
-        IntentOutput, ComplexityOutput, SubQuery,
-        StrategyOutput, ToolPlanItem, ExecutionOrderOutput,
-        engine as planning_engine,
-    )
+    from grok_search.utils import format_extra_sources
 except ImportError:
     from .providers.grok import GrokSearchProvider
     from .logger import log_info
     from .config import config
-    from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
-    from .planning import (
-        IntentOutput, ComplexityOutput, SubQuery,
-        StrategyOutput, ToolPlanItem, ExecutionOrderOutput,
-        engine as planning_engine,
-    )
+    from .utils import format_extra_sources
 
 import asyncio
 
 mcp = FastMCP("grok-search")
 
-_SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
 
@@ -84,79 +73,31 @@ async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
     return models
 
 
-def _extra_results_to_sources(
-    tavily_results: list[dict] | None,
-    firecrawl_results: list[dict] | None,
-) -> list[dict]:
-    sources: list[dict] = []
-    seen: set[str] = set()
-
-    if firecrawl_results:
-        for r in firecrawl_results:
-            url = (r.get("url") or "").strip()
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            item: dict = {"url": url, "provider": "firecrawl"}
-            title = (r.get("title") or "").strip()
-            if title:
-                item["title"] = title
-            desc = (r.get("description") or "").strip()
-            if desc:
-                item["description"] = desc
-            sources.append(item)
-
-    if tavily_results:
-        for r in tavily_results:
-            url = (r.get("url") or "").strip()
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            item: dict = {"url": url, "provider": "tavily"}
-            title = (r.get("title") or "").strip()
-            if title:
-                item["title"] = title
-            content = (r.get("content") or "").strip()
-            if content:
-                item["description"] = content
-            sources.append(item)
-
-    return sources
-
-
 @mcp.tool(
     name="web_search",
     description="""
-    Before using this tool, please use the search_planning tool to plan the search carefully.
     Performs a deep web search based on the given query and returns Grok's answer directly.
-
-    This tool extracts sources if provided by upstream, caches them, and returns:
-    - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
-    - content: string (answer only)
-    - sources_count: int
+    When extra_sources > 0, additional references from Tavily/Firecrawl are appended.
     """,
-    meta={"version": "2.0.0", "author": "guda.studio"},
+    meta={"version": "2.1.0", "author": "guda.studio"},
 )
 async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
     extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
-) -> dict:
-    session_id = new_session_id()
+) -> str:
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
     except ValueError as e:
-        await _SOURCES_CACHE.set(session_id, [])
-        return {"session_id": session_id, "content": f"配置错误: {str(e)}", "sources_count": 0}
+        return f"配置错误: {str(e)}"
 
     effective_model = config.grok_model
     if model:
         available = await _get_available_models_cached(api_url, api_key)
         if available and model not in available:
-            await _SOURCES_CACHE.set(session_id, [])
-            return {"session_id": session_id, "content": f"无效模型: {model}", "sources_count": 0}
+            return f"无效模型: {model}"
         effective_model = model
 
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
@@ -168,8 +109,9 @@ async def web_search(
     tavily_count = 0
     if extra_sources > 0:
         if has_firecrawl and has_tavily:
-            firecrawl_count = round(extra_sources * 1)
-            tavily_count = extra_sources - firecrawl_count
+            # Keep Grok as primary search while guaranteeing Tavily involvement.
+            tavily_count = max(1, round(extra_sources * 0.3))
+            firecrawl_count = max(0, extra_sources - tavily_count)
         elif has_firecrawl:
             firecrawl_count = extra_sources
         elif has_tavily:
@@ -214,35 +156,10 @@ async def web_search(
     if firecrawl_count > 0:
         firecrawl_results = gathered[idx]
 
-    answer, grok_sources = split_answer_and_sources(grok_result)
-    extra = _extra_results_to_sources(tavily_results, firecrawl_results)
-    all_sources = merge_sources(grok_sources, extra)
-
-    await _SOURCES_CACHE.set(session_id, all_sources)
-    return {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
-
-
-@mcp.tool(
-    name="get_sources",
-    description="""
-    When you feel confused or curious about the search response content, use the session_id returned by web_search to invoke the this tool to obtain the corresponding list of information sources.
-    Retrieve all cached sources for a previous web_search call.
-    Provide the session_id returned by web_search to get the full source list.
-    """,
-    meta={"version": "1.0.0", "author": "guda.studio"},
-)
-async def get_sources(
-    session_id: Annotated[str, "Session ID from previous web_search call."]
-) -> dict:
-    sources = await _SOURCES_CACHE.get(session_id)
-    if sources is None:
-        return {
-            "session_id": session_id,
-            "sources": [],
-            "sources_count": 0,
-            "error": "session_id_not_found_or_expired",
-        }
-    return {"session_id": session_id, "sources": sources, "sources_count": len(sources)}
+    extra_text = format_extra_sources(tavily_results, firecrawl_results)
+    if extra_text:
+        return f"{grok_result}\n\n---\n\n{extra_text}"
+    return grok_result
 
 
 async def _call_tavily_extract(url: str) -> str | None:
@@ -693,106 +610,6 @@ async def toggle_builtin_tools(
         "file": str(settings_path),
         "message": msg
     }, ensure_ascii=False, indent=2)
-
-
-@mcp.tool(
-    name="search_planning",
-    description="""
-    A structured thinking scaffold for planning web searches BEFORE execution. Produces no side effects — only organizes your reasoning into a reusable plan.
-
-    **WHEN TO USE**: Before any search requiring 2+ tool calls, or when the query is ambiguous/multi-faceted. Skip for single obvious lookups.
-
-    **HOW**: Call once per phase, filling only that phase's structured field. The server tracks your session and signals when the plan is complete.
-
-    ## Phases (call in order, one per invocation)
-
-    ### 1. `intent_analysis` → fill `intent`
-    Distill the user's real question. Classify type and time sensitivity. Surface ambiguities and flawed premises. Identify `unverified_terms` — external classifications/rankings/taxonomies (e.g., "CCF-A", "Fortune 500") whose contents you cannot reliably enumerate from memory.
-
-    ### 2. `complexity_assessment` → fill `complexity`
-    Rate 1-3. This controls how many phases are required:
-    - **Level 1** (1-2 searches): phases 1-3 only → then execute
-    - **Level 2** (3-5 searches): phases 1-5
-    - **Level 3** (6+ searches): all 6 phases
-
-    ### 3. `query_decomposition` → fill `sub_queries`
-    Split into non-overlapping sub-queries along ONE decomposition axis (e.g., by venue type OR by technique — never both). Each `boundary` must state mutual exclusion with sibling sub-queries. Use `depends_on` for sequential dependencies.
-    **Prerequisite rule**: If Phase 1 identified `unverified_terms`, create a prerequisite sub-query to verify each term's current contents FIRST. Other sub-queries must `depends_on` it — do NOT hardcode assumed values from training data.
-
-    ### 4. `search_strategy` → fill `strategy`
-    Design concise search terms (max 8 words each). One term serves one sub-query. Choose approach:
-    - `broad_first`: round 1 wide scan → round 2+ narrow based on findings (exploratory)
-    - `narrow_first`: precise first, expand if needed (analytical)
-    - `targeted`: known-item retrieval (factual)
-
-    ### 5. `tool_selection` → fill `tool_plan`
-    Map each sub-query to optimal tool:
-    - **web_search**(query, platform?, extra_sources?): general retrieval
-    - **web_fetch**(url): extract full markdown from known URL
-    - **web_map**(url, instructions?, max_depth?): discover site structure
-
-    ### 6. `execution_order` → fill `execution_order`
-    Group independent sub-queries into parallel batches. Sequence dependent ones.
-
-    ## Anti-patterns (AVOID)
-    - ❌ `codebase RAG retrieval augmented generation 2024 2025 paper` (9 words, synonym stacking)
-      ✅ `codebase RAG papers 2024` (4 words, concise)
-    - ❌ purpose: "sq1+sq2" (merged scope defeats decomposition)
-      ✅ purpose: "sq2" (one term, one goal)
-    - ❌ Decompose by venue (sq1=SE, sq2=AI) AND by technique (sq3=indexing, sq4=repo-level) — creates overlapping matrix
-      ✅ Pick ONE axis: by venue (sq1=SE, sq2=AI, sq3=IR) OR by technique (sq1=RAG systems, sq2=indexing, sq3=retrieval)
-    - ❌ All terms round 1 with broad_first (no depth)
-      ✅ Round 1: broad terms → Round 2: refined by Round 1 findings
-    - ❌ Level 3 for simple "what is X?" → Level 1 suffices
-    - ❌ Skipping intent_analysis → always start here
-
-    ## Session & Revision
-    First call: leave `session_id` empty → server returns one. Pass it back in subsequent calls.
-    To revise: set `is_revision=true` + `revises_phase` to overwrite a previous phase.
-    Plan auto-completes when all required phases (per complexity level) are filled.
-    """,
-    meta={"version": "1.0.0", "author": "guda.studio"},
-)
-async def search_planning(
-    phase: Annotated[str, "Current phase: intent_analysis | complexity_assessment | query_decomposition | search_strategy | tool_selection | execution_order"],
-    thought: Annotated[str, "Your reasoning for this phase — explain WHY, not just WHAT"],
-    next_phase_needed: Annotated[bool, "true to continue planning, false when done or plan auto-completes"],
-    intent: Optional[IntentOutput] = None,
-    complexity: Optional[ComplexityOutput] = None,
-    sub_queries: Optional[list[SubQuery]] = None,
-    strategy: Optional[StrategyOutput] = None,
-    tool_plan: Optional[list[ToolPlanItem]] = None,
-    execution_order: Optional[ExecutionOrderOutput] = None,
-    session_id: Annotated[str, "Session ID from previous call. Empty for new session."] = "",
-    is_revision: Annotated[bool, "true to revise a previously completed phase"] = False,
-    revises_phase: Annotated[str, "Phase name to revise (required if is_revision=true)"] = "",
-    confidence: Annotated[float, "Confidence in this phase's output (0.0-1.0)"] = 1.0,
-) -> str:
-    import json
-
-    phase_data_map = {
-        "intent_analysis": intent.model_dump() if intent else None,
-        "complexity_assessment": complexity.model_dump() if complexity else None,
-        "query_decomposition": [sq.model_dump() for sq in sub_queries] if sub_queries else None,
-        "search_strategy": strategy.model_dump() if strategy else None,
-        "tool_selection": [tp.model_dump() for tp in tool_plan] if tool_plan else None,
-        "execution_order": execution_order.model_dump() if execution_order else None,
-    }
-
-    target = revises_phase if is_revision and revises_phase else phase
-    phase_data = phase_data_map.get(target)
-
-    result = planning_engine.process_phase(
-        phase=phase,
-        thought=thought,
-        session_id=session_id,
-        is_revision=is_revision,
-        revises_phase=revises_phase,
-        confidence=confidence,
-        phase_data=phase_data,
-    )
-
-    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def main():
