@@ -395,7 +395,12 @@ def main():
         threading.Thread(target=monitor_parent, daemon=True).start()
 
     try:
-        mcp.run(transport="stdio")
+        mcp.run_sse_async
+        import asyncio
+        asyncio.run(mcp.run_sse_async(host="0.0.0.0", port=int(os.getenv("MCP_PORT", "8809"))))
+    except AttributeError:
+        # fallback: newer fastmcp
+        mcp.run(transport="sse", host="0.0.0.0", port=int(os.getenv("MCP_PORT", "8809")))
     except KeyboardInterrupt:
         pass
     finally:
